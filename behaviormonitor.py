@@ -10,6 +10,13 @@ import json
 from dataclasses import dataclass, asdict
 import hashlib
 import time
+import os
+import logging
+from contextlib import contextmanager
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ====================== BACKEND SYSTEM ======================
 
@@ -43,61 +50,215 @@ class BehaviorBackend:
     """Backend system for behavior monitoring data storage and retrieval"""
     
     def __init__(self):
-        self.conn = sqlite3.connect(':memory:', check_same_thread=False)
+        self.db_path = os.getenv('DB_PATH', 'behavior_monitor.db')
         self._init_db()
-        self._seed_test_data()
+        self._cleanup_old_sessions()
+    
+    @contextmanager
+    def get_db_connection(self):
+        """Get database connection with proper error handling"""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            yield conn
+        except sqlite3.Error as e:
+            logger.error(f"Database error: {str(e)}")
+            raise
+        finally:
+            if conn:
+                conn.close()
     
     def _init_db(self):
         """Initialize database tables"""
-        cursor = self.conn.cursor()
-        
-        # User profiles table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_profiles (
-            user_id TEXT PRIMARY KEY,
-            name TEXT,
-            baseline_typing_speed REAL,
-            baseline_rhythm TEXT,
-            baseline_key_duration REAL,
-            created_at TEXT,
-            last_active TEXT
-        )
-        """)
-        
-        # Sessions table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            session_id TEXT PRIMARY KEY,
-            user_id TEXT,
-            start_time TEXT,
-            end_time TEXT,
-            typing_speed REAL,
-            rhythm_consistency REAL,
-            key_duration REAL,
-            risk_score REAL,
-            anomaly_score REAL,
-            typing_pattern TEXT,
-            metadata TEXT,
-            FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
-        )
-        """)
-        
-        # Alerts table
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS alerts (
-            alert_id TEXT PRIMARY KEY,
-            user_id TEXT,
-            session_id TEXT,
-            alert_type TEXT,
-            message TEXT,
-            timestamp TEXT,
-            severity INTEGER,
-            FOREIGN KEY(user_id) REFERENCES user_profiles(user_id),
-            FOREIGN KEY(session_id) REFERENCES sessions(session_id)
-        )
-        """)
-        
-        self.conn.commit()
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # User profiles table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_profiles (
+                    user_id TEXT PRIMARY KEY,
+                    name TEXT,
+                    baseline_typing_speed REAL,
+                    baseline_rhythm TEXT,
+                    baseline_key_duration REAL,
+                    created_at TEXT,
+                    last_active TEXT
+                )
+                """)
+                
+                # Sessions table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    start_time TEXT,
+                    end_time TEXT,
+                    typing_speed REAL,
+                    rhythm_consistency REAL,
+                    key_duration REAL,
+                    risk_score REAL,
+                    anomaly_score REAL,
+                    typing_pattern TEXT,
+                    metadata TEXT,
+                    FOREIGN KEY(user_id) REFERENCES user_profiles(user_id)
+                )
+                """)
+                
+                # Alerts table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS alerts (
+                    alert_id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    session_id TEXT,
+                    alert_type TEXT,
+                    message TEXT,
+                    timestamp TEXT,
+                    severity INTEGER,
+                    FOREIGN KEY(user_id) REFERENCES user_profiles(user_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+                )
+                """)
+                
+                # Create indexes
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_start_time ON sessions(start_time)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id)")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_timestamp ON alerts(timestamp)")
+                
+                conn.commit()
+                
+                # Seed test data if database is empty
+                cursor.execute("SELECT COUNT(*) FROM user_profiles")
+                if cursor.fetchone()[0] == 0:
+                    self._seed_test_data()
+        except Exception as e:
+            logger.error(f"Error initializing database: {str(e)}")
+            raise
+    
+    def _cleanup_old_sessions(self):
+        """Clean up old sessions and alerts"""
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Delete sessions older than 30 days
+                thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
+                cursor.execute("""
+                DELETE FROM sessions 
+                WHERE start_time < ?
+                """, (thirty_days_ago,))
+                
+                # Delete alerts older than 90 days
+                ninety_days_ago = (datetime.now() - timedelta(days=90)).isoformat()
+                cursor.execute("""
+                DELETE FROM alerts 
+                WHERE timestamp < ?
+                """, (ninety_days_ago,))
+                
+                conn.commit()
+                
+                logger.info(f"Cleaned up {cursor.rowcount} old records")
+        except Exception as e:
+            logger.error(f"Error cleaning up old sessions: {str(e)}")
+    
+    def save_user_profile(self, profile: UserProfile):
+        """Save user profile to database"""
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                INSERT OR REPLACE INTO user_profiles 
+                (user_id, name, baseline_typing_speed, baseline_rhythm, baseline_key_duration, created_at, last_active)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    profile.user_id,
+                    profile.name,
+                    profile.baseline_typing_speed,
+                    json.dumps(profile.baseline_rhythm),
+                    profile.baseline_key_duration,
+                    profile.created_at.isoformat(),
+                    profile.last_active.isoformat()
+                ))
+                
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error saving user profile: {str(e)}")
+            raise
+    
+    def get_user_profile(self, user_id: str) -> Optional[UserProfile]:
+        """Retrieve user profile from database"""
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                SELECT * FROM user_profiles WHERE user_id = ?
+                """, (user_id,))
+                
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                    
+                return UserProfile(
+                    user_id=row['user_id'],
+                    name=row['name'],
+                    baseline_typing_speed=row['baseline_typing_speed'],
+                    baseline_rhythm=json.loads(row['baseline_rhythm']),
+                    baseline_key_duration=row['baseline_key_duration'],
+                    created_at=datetime.fromisoformat(row['created_at']),
+                    last_active=datetime.fromisoformat(row['last_active'])
+                )
+        except Exception as e:
+            logger.error(f"Error getting user profile: {str(e)}")
+            raise
+    
+    def save_session(self, session: SessionRecord):
+        """Save session record to database"""
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                INSERT INTO sessions 
+                (session_id, user_id, start_time, end_time, typing_speed, rhythm_consistency, key_duration, 
+                 risk_score, anomaly_score, typing_pattern, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    session.session_id,
+                    session.user_id,
+                    session.start_time.isoformat(),
+                    session.end_time.isoformat(),
+                    session.typing_speed,
+                    session.rhythm_consistency,
+                    session.key_duration,
+                    session.risk_score,
+                    session.anomaly_score,
+                    json.dumps(session.typing_pattern),
+                    json.dumps(session.metadata)
+                ))
+                
+                # Update user's last active time
+                cursor.execute("""
+                UPDATE user_profiles SET last_active = ? WHERE user_id = ?
+                """, (session.end_time.isoformat(), session.user_id))
+                
+                conn.commit()
+                
+                # Generate alerts if needed
+                if session.anomaly_score > 0.7:
+                    self.create_alert(
+                        user_id=session.user_id,
+                        session_id=session.session_id,
+                        alert_type="high_anomaly",
+                        message=f"High anomaly score detected: {session.anomaly_score:.2f}",
+                        severity=2
+                    )
+        except Exception as e:
+            logger.error(f"Error saving session: {str(e)}")
+            raise
     
     def _seed_test_data(self):
         """Seed the database with test data"""
@@ -171,274 +332,227 @@ class BehaviorBackend:
             }
         )
     
-    def save_user_profile(self, profile: UserProfile):
-        """Save user profile to database"""
-        cursor = self.conn.cursor()
-        
-        cursor.execute("""
-        INSERT OR REPLACE INTO user_profiles 
-        (user_id, name, baseline_typing_speed, baseline_rhythm, baseline_key_duration, created_at, last_active)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            profile.user_id,
-            profile.name,
-            profile.baseline_typing_speed,
-            json.dumps(profile.baseline_rhythm),
-            profile.baseline_key_duration,
-            profile.created_at.isoformat(),
-            profile.last_active.isoformat()
-        ))
-        
-        self.conn.commit()
-    
-    def get_user_profile(self, user_id: str) -> Optional[UserProfile]:
-        """Retrieve user profile from database"""
-        cursor = self.conn.cursor()
-        
-        cursor.execute("""
-        SELECT * FROM user_profiles WHERE user_id = ?
-        """, (user_id,))
-        
-        row = cursor.fetchone()
-        if not row:
-            return None
-            
-        return UserProfile(
-            user_id=row[0],
-            name=row[1],
-            baseline_typing_speed=row[2],
-            baseline_rhythm=json.loads(row[3]),
-            baseline_key_duration=row[4],
-            created_at=datetime.fromisoformat(row[5]),
-            last_active=datetime.fromisoformat(row[6])
-        )
-    
-    def save_session(self, session: SessionRecord):
-        """Save session record to database"""
-        cursor = self.conn.cursor()
-        
-        cursor.execute("""
-        INSERT INTO sessions 
-        (session_id, user_id, start_time, end_time, typing_speed, rhythm_consistency, key_duration, 
-         risk_score, anomaly_score, typing_pattern, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            session.session_id,
-            session.user_id,
-            session.start_time.isoformat(),
-            session.end_time.isoformat(),
-            session.typing_speed,
-            session.rhythm_consistency,
-            session.key_duration,
-            session.risk_score,
-            session.anomaly_score,
-            json.dumps(session.typing_pattern),
-            json.dumps(session.metadata)
-        ))
-        
-        # Update user's last active time
-        cursor.execute("""
-        UPDATE user_profiles SET last_active = ? WHERE user_id = ?
-        """, (session.end_time.isoformat(), session.user_id))
-        
-        self.conn.commit()
-        
-        # Generate alerts if needed
-        if session.anomaly_score > 0.7:
-            self.create_alert(
-                user_id=session.user_id,
-                session_id=session.session_id,
-                alert_type="TYPING_ANOMALY",
-                message=f"High anomaly score detected ({session.anomaly_score:.2f})",
-                severity=2
-            )
-    
     def get_user_sessions(self, user_id: str, limit: int = 100) -> List[SessionRecord]:
         """Get sessions for a specific user"""
-        cursor = self.conn.cursor()
-        
-        cursor.execute("""
-        SELECT * FROM sessions 
-        WHERE user_id = ?
-        ORDER BY end_time DESC
-        LIMIT ?
-        """, (user_id, limit))
-        
-        sessions = []
-        for row in cursor.fetchall():
-            sessions.append(SessionRecord(
-                session_id=row[0],
-                user_id=row[1],
-                start_time=datetime.fromisoformat(row[2]),
-                end_time=datetime.fromisoformat(row[3]),
-                typing_speed=row[4],
-                rhythm_consistency=row[5],
-                key_duration=row[6],
-                risk_score=row[7],
-                anomaly_score=row[8],
-                typing_pattern=json.loads(row[9]),
-                metadata=json.loads(row[10])
-            ))
-        
-        return sessions
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                SELECT * FROM sessions 
+                WHERE user_id = ?
+                ORDER BY end_time DESC
+                LIMIT ?
+                """, (user_id, limit))
+                
+                sessions = []
+                for row in cursor.fetchall():
+                    sessions.append(SessionRecord(
+                        session_id=row['session_id'],
+                        user_id=row['user_id'],
+                        start_time=datetime.fromisoformat(row['start_time']),
+                        end_time=datetime.fromisoformat(row['end_time']),
+                        typing_speed=row['typing_speed'],
+                        rhythm_consistency=row['rhythm_consistency'],
+                        key_duration=row['key_duration'],
+                        risk_score=row['risk_score'],
+                        anomaly_score=row['anomaly_score'],
+                        typing_pattern=json.loads(row['typing_pattern']),
+                        metadata=json.loads(row['metadata'])
+                    ))
+                
+                return sessions
+        except Exception as e:
+            logger.error(f"Error getting user sessions: {str(e)}")
+            raise
     
     def get_recent_sessions(self, hours: int = 24) -> List[SessionRecord]:
         """Get recent sessions across all users"""
-        cursor = self.conn.cursor()
-        cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
-        
-        cursor.execute("""
-        SELECT * FROM sessions 
-        WHERE end_time > ?
-        ORDER BY end_time DESC
-        """, (cutoff,))
-        
-        sessions = []
-        for row in cursor.fetchall():
-            sessions.append(SessionRecord(
-                session_id=row[0],
-                user_id=row[1],
-                start_time=datetime.fromisoformat(row[2]),
-                end_time=datetime.fromisoformat(row[3]),
-                typing_speed=row[4],
-                rhythm_consistency=row[5],
-                key_duration=row[6],
-                risk_score=row[7],
-                anomaly_score=row[8],
-                typing_pattern=json.loads(row[9]),
-                metadata=json.loads(row[10])
-            ))
-        
-        return sessions
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+                
+                cursor.execute("""
+                SELECT * FROM sessions 
+                WHERE end_time > ?
+                ORDER BY end_time DESC
+                """, (cutoff,))
+                
+                sessions = []
+                for row in cursor.fetchall():
+                    sessions.append(SessionRecord(
+                        session_id=row['session_id'],
+                        user_id=row['user_id'],
+                        start_time=datetime.fromisoformat(row['start_time']),
+                        end_time=datetime.fromisoformat(row['end_time']),
+                        typing_speed=row['typing_speed'],
+                        rhythm_consistency=row['rhythm_consistency'],
+                        key_duration=row['key_duration'],
+                        risk_score=row['risk_score'],
+                        anomaly_score=row['anomaly_score'],
+                        typing_pattern=json.loads(row['typing_pattern']),
+                        metadata=json.loads(row['metadata'])
+                    ))
+                
+                return sessions
+        except Exception as e:
+            logger.error(f"Error getting recent sessions: {str(e)}")
+            raise
     
     def create_alert(self, user_id: str, session_id: str, alert_type: str, 
                     message: str, severity: int = 1):
         """Create a new alert record"""
-        cursor = self.conn.cursor()
-        alert_id = hashlib.md5(f"{user_id}{session_id}{time.time()}".encode()).hexdigest()
-        
-        cursor.execute("""
-        INSERT INTO alerts 
-        (alert_id, user_id, session_id, alert_type, message, timestamp, severity)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (
-            alert_id,
-            user_id,
-            session_id,
-            alert_type,
-            message,
-            datetime.now().isoformat(),
-            severity
-        ))
-        
-        self.conn.commit()
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                alert_id = hashlib.md5(f"{user_id}{session_id}{time.time()}".encode()).hexdigest()
+                
+                cursor.execute("""
+                INSERT INTO alerts 
+                (alert_id, user_id, session_id, alert_type, message, timestamp, severity)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    alert_id,
+                    user_id,
+                    session_id,
+                    alert_type,
+                    message,
+                    datetime.now().isoformat(),
+                    severity
+                ))
+                
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error creating alert: {str(e)}")
+            raise
     
     def get_recent_alerts(self, limit: int = 10) -> List[Dict]:
         """Get recent alerts"""
-        cursor = self.conn.cursor()
-        
-        cursor.execute("""
-        SELECT a.*, u.name FROM alerts a
-        LEFT JOIN user_profiles u ON a.user_id = u.user_id
-        ORDER BY timestamp DESC
-        LIMIT ?
-        """, (limit,))
-        
-        alerts = []
-        for row in cursor.fetchall():
-            alerts.append({
-                'alert_id': row[0],
-                'user_id': row[1],
-                'user_name': row[6],
-                'session_id': row[2],
-                'alert_type': row[3],
-                'message': row[4],
-                'timestamp': datetime.fromisoformat(row[5]),
-                'severity': row[6]
-            })
-        
-        return alerts
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                SELECT a.*, u.name FROM alerts a
+                LEFT JOIN user_profiles u ON a.user_id = u.user_id
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """, (limit,))
+                
+                alerts = []
+                for row in cursor.fetchall():
+                    alerts.append({
+                        'alert_id': row['alert_id'],
+                        'user_id': row['user_id'],
+                        'user_name': row['name'],
+                        'session_id': row['session_id'],
+                        'alert_type': row['alert_type'],
+                        'message': row['message'],
+                        'timestamp': datetime.fromisoformat(row['timestamp']),
+                        'severity': row['severity']
+                    })
+                
+                return alerts
+        except Exception as e:
+            logger.error(f"Error getting recent alerts: {str(e)}")
+            raise
     
     def get_active_users(self) -> List[UserProfile]:
         """Get users active in the last 15 minutes"""
-        cursor = self.conn.cursor()
-        cutoff = (datetime.now() - timedelta(minutes=15)).isoformat()
-        
-        cursor.execute("""
-        SELECT * FROM user_profiles 
-        WHERE last_active > ?
-        ORDER BY last_active DESC
-        """, (cutoff,))
-        
-        users = []
-        for row in cursor.fetchall():
-            users.append(UserProfile(
-                user_id=row[0],
-                name=row[1],
-                baseline_typing_speed=row[2],
-                baseline_rhythm=json.loads(row[3]),
-                baseline_key_duration=row[4],
-                created_at=datetime.fromisoformat(row[5]),
-                last_active=datetime.fromisoformat(row[6])
-            ))
-        
-        return users
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                cutoff = (datetime.now() - timedelta(minutes=15)).isoformat()
+                
+                cursor.execute("""
+                SELECT * FROM user_profiles 
+                WHERE last_active > ?
+                ORDER BY last_active DESC
+                """, (cutoff,))
+                
+                users = []
+                for row in cursor.fetchall():
+                    users.append(UserProfile(
+                        user_id=row['user_id'],
+                        name=row['name'],
+                        baseline_typing_speed=row['baseline_typing_speed'],
+                        baseline_rhythm=json.loads(row['baseline_rhythm']),
+                        baseline_key_duration=row['baseline_key_duration'],
+                        created_at=datetime.fromisoformat(row['created_at']),
+                        last_active=datetime.fromisoformat(row['last_active'])
+                    ))
+                
+                return users
+        except Exception as e:
+            logger.error(f"Error getting active users: {str(e)}")
+            raise
     
     def get_typing_stats(self) -> Dict[str, Any]:
         """Get aggregated typing statistics"""
-        cursor = self.conn.cursor()
-        
-        # Get average typing speed
-        cursor.execute("SELECT AVG(typing_speed) FROM sessions")
-        avg_speed = cursor.fetchone()[0] or 0.0
-        
-        # Get count of typing anomalies
-        cursor.execute("SELECT COUNT(*) FROM sessions WHERE anomaly_score > 0.7")
-        anomaly_count = cursor.fetchone()[0] or 0
-        
-        # Get count of active sessions in last hour
-        cursor.execute("""
-        SELECT COUNT(DISTINCT user_id) FROM sessions 
-        WHERE end_time > ?
-        """, ((datetime.now() - timedelta(hours=1)).isoformat(),))
-        active_users = cursor.fetchone()[0] or 0
-        
-        return {
-            'avg_speed': avg_speed,
-            'anomaly_count': anomaly_count,
-            'active_users': active_users,
-            'model_accuracy': 0.85 + np.random.uniform(-0.05, 0.05)  # Simulated accuracy
-        }
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get average typing speed
+                cursor.execute("SELECT AVG(typing_speed) FROM sessions")
+                avg_speed = cursor.fetchone()[0] or 0.0
+                
+                # Get count of typing anomalies
+                cursor.execute("SELECT COUNT(*) FROM sessions WHERE anomaly_score > 0.7")
+                anomaly_count = cursor.fetchone()[0] or 0
+                
+                # Get count of active sessions in last hour
+                cursor.execute("""
+                SELECT COUNT(DISTINCT user_id) FROM sessions 
+                WHERE end_time > ?
+                """, ((datetime.now() - timedelta(hours=1)).isoformat(),))
+                active_users = cursor.fetchone()[0] or 0
+                
+                return {
+                    'avg_speed': avg_speed,
+                    'anomaly_count': anomaly_count,
+                    'active_users': active_users,
+                    'model_accuracy': 0.85 + np.random.uniform(-0.05, 0.05)  # Simulated accuracy
+                }
+        except Exception as e:
+            logger.error(f"Error getting typing stats: {str(e)}")
+            raise
 
     def get_session_metrics(self, session_id: str) -> Dict[str, Any]:
         """Get metrics for a specific session"""
-        cursor = self.conn.cursor()
-        
-        cursor.execute("""
-        SELECT * FROM sessions WHERE session_id = ?
-        """, (session_id,))
-        
-        row = cursor.fetchone()
-        if not row:
-            return {
-                "duration": 0,
-                "typing_speed": 0,
-                "risk_score": 0,
-                "anomaly_score": 0,
-                "rhythm_consistency": 0
-            }
-            
-        start_time = datetime.fromisoformat(row[2])
-        end_time = datetime.fromisoformat(row[3])
-        duration = (end_time - start_time).total_seconds()
-        
-        return {
-            "duration": duration,
-            "typing_speed": row[4],
-            "risk_score": row[7],
-            "anomaly_score": row[8],
-            "rhythm_consistency": row[5]
-        }
+        try:
+            with self.get_db_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                SELECT * FROM sessions WHERE session_id = ?
+                """, (session_id,))
+                
+                row = cursor.fetchone()
+                if not row:
+                    return {
+                        "duration": 0,
+                        "typing_speed": 0,
+                        "risk_score": 0,
+                        "anomaly_score": 0,
+                        "rhythm_consistency": 0
+                    }
+                    
+                start_time = datetime.fromisoformat(row['start_time'])
+                end_time = datetime.fromisoformat(row['end_time'])
+                duration = (end_time - start_time).total_seconds()
+                
+                return {
+                    "duration": duration,
+                    "typing_speed": row['typing_speed'],
+                    "risk_score": row['risk_score'],
+                    "anomaly_score": row['anomaly_score'],
+                    "rhythm_consistency": row['rhythm_consistency']
+                }
+        except Exception as e:
+            logger.error(f"Error getting session metrics: {str(e)}")
+            raise
 
 # ====================== FRONTEND COMPONENT ======================
 

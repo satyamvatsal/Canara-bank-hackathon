@@ -4,8 +4,52 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from behaviormonitor import BehaviorBackend
+import logging
+from pydantic import BaseModel, validator
+from functools import lru_cache
+import time
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Input validation models
+class FraudMetrics(BaseModel):
+    user_id: str
+    session_id: str
+    timestamp: datetime
+    typing_speed: float
+    key_intervals: List[float]
+    backspace_frequency: float
+    error_rate: float
+    device_id: str
+    location: Dict[str, str]
+    
+    @validator('typing_speed')
+    def validate_typing_speed(cls, v):
+        if v < 0 or v > 1000:  # Unrealistic typing speeds
+            raise ValueError("Invalid typing speed")
+        return v
+    
+    @validator('key_intervals')
+    def validate_intervals(cls, v):
+        if not v or any(i < 0 or i > 5000 for i in v):  # Unrealistic intervals
+            raise ValueError("Invalid key intervals")
+        return v
+    
+    @validator('backspace_frequency')
+    def validate_backspace(cls, v):
+        if v < 0 or v > 1:
+            raise ValueError("Backspace frequency must be between 0 and 1")
+        return v
+    
+    @validator('error_rate')
+    def validate_error_rate(cls, v):
+        if v < 0 or v > 1:
+            raise ValueError("Error rate must be between 0 and 1")
+        return v
 
 class FraudDetection:
     """
@@ -17,7 +61,204 @@ class FraudDetection:
         self.detection_threshold = 0.7
         self.fraud_rate = 0.05  # Base fraud rate for simulation
         self.backend = BehaviorBackend()  # Initialize backend connection
+        self.cache_timeout = 300  # 5 minutes cache timeout
         
+    def analyze_typing_pattern(self, metrics: FraudMetrics) -> float:
+        """
+        Analyze typing pattern for potential fraud.
+        
+        Args:
+            metrics: Validated typing metrics
+            
+        Returns:
+            Risk score between 0 and 1
+            
+        Raises:
+            ValueError: If metrics are invalid
+        """
+        try:
+            # Get user's baseline profile
+            user_profile = self.backend.get_user_profile(metrics.user_id)
+            if not user_profile:
+                logger.warning(f"No baseline profile found for user {metrics.user_id}")
+                return 0.8  # High risk for unknown users
+            
+            # Calculate typing pattern deviation
+            speed_deviation = abs(metrics.typing_speed - user_profile.baseline_typing_speed)
+            speed_risk = min(speed_deviation / user_profile.baseline_typing_speed, 1.0)
+            
+            # Calculate rhythm deviation
+            rhythm_deviation = self._calculate_rhythm_deviation(
+                metrics.key_intervals,
+                user_profile.baseline_rhythm
+            )
+            
+            # Calculate error pattern risk
+            error_risk = self._calculate_error_risk(
+                metrics.backspace_frequency,
+                metrics.error_rate
+            )
+            
+            # Weighted risk score
+            risk_score = (
+                0.4 * speed_risk +
+                0.4 * rhythm_deviation +
+                0.2 * error_risk
+            )
+            
+            return min(risk_score, 1.0)
+        except Exception as e:
+            logger.error(f"Error analyzing typing pattern: {str(e)}")
+            return 0.9  # High risk on error
+    
+    @lru_cache(maxsize=1000)
+    def _calculate_rhythm_deviation(self, current: List[float], baseline: List[float]) -> float:
+        """Calculate deviation from baseline rhythm pattern."""
+        try:
+            if not current or not baseline:
+                return 1.0
+            
+            # Normalize patterns to same length
+            length = min(len(current), len(baseline))
+            current = current[:length]
+            baseline = baseline[:length]
+            
+            # Calculate normalized deviation
+            deviations = np.abs(np.array(current) - np.array(baseline))
+            avg_deviation = np.mean(deviations) / np.mean(baseline)
+            
+            return min(avg_deviation, 1.0)
+        except Exception as e:
+            logger.error(f"Error calculating rhythm deviation: {str(e)}")
+            return 1.0
+    
+    def _calculate_error_risk(self, backspace_freq: float, error_rate: float) -> float:
+        """Calculate risk based on error patterns."""
+        try:
+            # High backspace frequency but low error rate might indicate automated correction
+            if backspace_freq > 0.3 and error_rate < 0.05:
+                return 0.8
+            
+            # Very low error rate might indicate automated input
+            if error_rate < 0.01:
+                return 0.7
+            
+            # Very high error rate might indicate unauthorized user
+            if error_rate > 0.3:
+                return 0.9
+            
+            # Normal range
+            return 0.2 + (backspace_freq + error_rate) / 2
+        except Exception as e:
+            logger.error(f"Error calculating error risk: {str(e)}")
+            return 0.8
+    
+    @lru_cache(maxsize=100)
+    def _get_fraud_alerts(self) -> List[Dict]:
+        """Get recent fraud alerts with caching."""
+        try:
+            alerts = []
+            recent_sessions = self.backend.get_recent_sessions(hours=24)
+            
+            for session in recent_sessions:
+                if session.risk_score > self.detection_threshold:
+                    alerts.append({
+                        'id': session.session_id,
+                        'user_id': session.user_id,
+                        'timestamp': session.end_time,
+                        'risk_score': session.risk_score,
+                        'title': self._get_alert_title(session),
+                        'description': self._get_alert_description(session),
+                        'severity': self._get_severity(session.risk_score),
+                        'confidence': self._calculate_confidence(session),
+                        'session_id': session.session_id,
+                        'status': 'Active'
+                    })
+            
+            return sorted(alerts, key=lambda x: x['risk_score'], reverse=True)
+        except Exception as e:
+            logger.error(f"Error getting fraud alerts: {str(e)}")
+            return []
+    
+    def _get_alert_title(self, session: Any) -> str:
+        """Generate alert title based on risk factors."""
+        try:
+            if session.risk_score > 0.9:
+                return "🚨 Critical Risk Activity Detected"
+            elif session.risk_score > 0.8:
+                return "⚠️ High Risk Behavior Pattern"
+            elif session.risk_score > 0.7:
+                return "⚡ Suspicious Activity Detected"
+            else:
+                return "ℹ️ Unusual Behavior Pattern"
+        except Exception as e:
+            logger.error(f"Error generating alert title: {str(e)}")
+            return "⚠️ Alert"
+    
+    def _get_alert_description(self, session: Any) -> str:
+        """Generate detailed alert description."""
+        try:
+            factors = []
+            
+            if hasattr(session, 'typing_speed') and session.typing_speed > 0:
+                if session.typing_speed > 10:
+                    factors.append("Unusually fast typing speed")
+                elif session.typing_speed < 0.5:
+                    factors.append("Unusually slow typing speed")
+            
+            if hasattr(session, 'rhythm_consistency') and session.rhythm_consistency < 0.5:
+                factors.append("Inconsistent typing rhythm")
+            
+            if hasattr(session, 'metadata'):
+                metadata = session.metadata
+                if metadata.get('error_rate', 0) > 0.3:
+                    factors.append("High error rate")
+                if metadata.get('backspace_count', 0) > 50:
+                    factors.append("Excessive backspace usage")
+            
+            if not factors:
+                factors.append("Multiple risk factors detected")
+            
+            return " | ".join(factors)
+        except Exception as e:
+            logger.error(f"Error generating alert description: {str(e)}")
+            return "Multiple risk factors detected"
+    
+    def _get_severity(self, risk_score: float) -> str:
+        """Determine alert severity based on risk score."""
+        if risk_score > 0.9:
+            return "Critical"
+        elif risk_score > 0.8:
+            return "High"
+        elif risk_score > 0.7:
+            return "Medium"
+        else:
+            return "Low"
+    
+    def _calculate_confidence(self, session: Any) -> float:
+        """Calculate confidence in fraud detection."""
+        try:
+            # Base confidence on amount of data available
+            confidence = 0.5
+            
+            if hasattr(session, 'typing_pattern') and session.typing_pattern:
+                confidence += 0.2
+            
+            if hasattr(session, 'metadata'):
+                metadata = session.metadata
+                if metadata.get('duration_minutes', 0) > 5:
+                    confidence += 0.1
+                if metadata.get('backspace_count', 0) > 0:
+                    confidence += 0.1
+            
+            if hasattr(session, 'rhythm_consistency') and session.rhythm_consistency > 0:
+                confidence += 0.1
+            
+            return min(confidence, 0.95)
+        except Exception as e:
+            logger.error(f"Error calculating confidence: {str(e)}")
+            return 0.5
+    
     def render(self):
         """Render the fraud detection interface."""
         st.header("🚨 Fraud Detection")
@@ -396,32 +637,6 @@ class FraudDetection:
                     for lesson in case['lessons_learned']:
                         st.write(f"• {lesson}")
     
-    def _get_fraud_alerts(self) -> List[Dict]:
-        """Get current fraud alerts from behavior monitor."""
-        alerts = self.backend.get_recent_alerts(limit=5)
-        
-        # Transform alerts to required format
-        transformed_alerts = []
-        for alert in alerts:
-            # Get session details for additional context
-            sessions = self.backend.get_user_sessions(alert['user_id'], limit=1)
-            session = sessions[0] if sessions else None
-            
-            transformed_alerts.append({
-                'id': alert['alert_id'],
-                'title': alert['alert_type'],
-                'user_id': alert['user_id'],
-                'session_id': alert['session_id'],
-                'risk_score': session.risk_score if session else 0.75,
-                'confidence': session.anomaly_score if session else 0.8,
-                'severity': 'Critical' if alert['severity'] >= 3 else 'High' if alert['severity'] == 2 else 'Medium',
-                'timestamp': alert['timestamp'],
-                'status': 'Active',
-                'description': alert['message']
-            })
-        
-        return transformed_alerts
-    
     def _get_fraud_patterns(self) -> Dict:
         """Get fraud pattern analysis from behavior monitor."""
         # Get recent sessions
@@ -587,7 +802,6 @@ class FraudDetection:
         """Run fraud detection analysis."""
         with st.spinner("Running fraud detection analysis..."):
             # Simulate detection process
-            import time
             time.sleep(2)
             st.success("Fraud detection analysis completed successfully!")
     

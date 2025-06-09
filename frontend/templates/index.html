@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Banking Portal</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .hidden {
+            display: none;
+        }
+        .session-active {
+            background-color: #e8f5e9;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <!-- Login Section -->
+    <div id="login-section" class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="text-center">Secure Login</h3>
+                    </div>
+                    <div class="card-body">
+                        <form id="login-form">
+                            <div class="mb-3">
+                                <label for="username" class="form-label">Username</label>
+                                <input type="text" class="form-control" id="username" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="password" class="form-label">Password</label>
+                                <input type="password" class="form-control" id="password" required>
+                            </div>
+                            <button type="submit" class="btn btn-primary w-100">Login</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dashboard Section -->
+    <div id="dashboard-section" class="container mt-5 hidden">
+        <div class="row">
+            <!-- Account Overview -->
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-header">
+                        <h4>Account Overview</h4>
+                    </div>
+                    <div class="card-body">
+                        <div id="account-details">
+                            <!-- Account details will be populated here -->
+                        </div>
+                        <div class="session-active">
+                            <small>Session monitored for security</small>
+                            <div id="session-metrics" class="mt-2">
+                                <!-- Session metrics will be shown here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Security Status -->
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h4>Security Status</h4>
+                    </div>
+                    <div class="card-body">
+                        <div id="security-metrics">
+                            <!-- Security metrics will be shown here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Behavior monitoring initialization
+        let sessionId = null;
+        let behaviorMetrics = {
+            typing: [],
+            mouse: [],
+            device: null
+        };
+
+        // Initialize monitoring
+        async function initializeMonitoring() {
+            // Start session
+            const response = await fetch('/api/session/start', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            const data = await response.json();
+            sessionId = data.sessionId;
+            
+            // Start collecting metrics
+            startMonitoringSession();
+        }
+
+        // Login form submission
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            // Collect login data
+            const loginData = {
+                username: document.getElementById('username').value,
+                password: document.getElementById('password').value,
+                device_info: await collectDeviceInfo()
+            };
+
+            try {
+                const response = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(loginData)
+                });
+
+                if (response.ok) {
+                    // Show dashboard and start monitoring
+                    document.getElementById('login-section').classList.add('hidden');
+                    document.getElementById('dashboard-section').classList.remove('hidden');
+                    initializeMonitoring();
+                } else {
+                    alert('Login failed. Please try again.');
+                }
+            } catch (error) {
+                console.error('Login error:', error);
+                alert('An error occurred during login.');
+            }
+        });
+
+        // Behavior monitoring functions
+        function monitorKeyPress(event) {
+            const metrics = {
+                key: event.key,
+                timestamp: Date.now(),
+                duration: event.duration,
+                target: event.target.id
+            };
+            behaviorMetrics.typing.push(metrics);
+            sendMetrics('typing', metrics);
+        }
+
+        function monitorMouseMovement(event) {
+            const metrics = {
+                x: event.clientX,
+                y: event.clientY,
+                timestamp: Date.now(),
+                target: event.target.id
+            };
+            behaviorMetrics.mouse.push(metrics);
+            sendMetrics('mouse', metrics);
+        }
+
+        async function collectDeviceInfo() {
+            const info = {
+                userAgent: navigator.userAgent,
+                screen: {
+                    width: screen.width,
+                    height: screen.height
+                },
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                language: navigator.language
+            };
+            behaviorMetrics.device = info;
+            return info;
+        }
+
+        async function sendMetrics(type, data) {
+            try {
+                await fetch(`/api/behavior/${type}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Session-ID': sessionId
+                    },
+                    body: JSON.stringify(data)
+                });
+            } catch (error) {
+                console.error(`Error sending ${type} metrics:`, error);
+            }
+        }
+
+        // Start monitoring session
+        function startMonitoringSession() {
+            // Attach event listeners
+            document.addEventListener('keypress', monitorKeyPress);
+            document.addEventListener('mousemove', monitorMouseMovement);
+            
+            // Collect initial device info
+            collectDeviceInfo();
+            
+            // Start periodic data collection
+            setInterval(() => {
+                updateSessionMetrics();
+            }, 5000);
+        }
+
+        // Update session metrics display
+        function updateSessionMetrics() {
+            const metricsDiv = document.getElementById('session-metrics');
+            metricsDiv.innerHTML = `
+                <div class="row">
+                    <div class="col">
+                        <small>Typing Events: ${behaviorMetrics.typing.length}</small>
+                    </div>
+                    <div class="col">
+                        <small>Mouse Events: ${behaviorMetrics.mouse.length}</small>
+                    </div>
+                </div>
+            `;
+        }
+    </script>
+</body>
+</html> 
