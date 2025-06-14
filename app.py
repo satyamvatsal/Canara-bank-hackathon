@@ -114,18 +114,31 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def get_client_location():
-    """Get client's location based on IP address"""
+    """Get client's location using JS to get IP, then fetch geolocation"""
     try:
-        data = st_javascript("""await fetch('https://api.ipify.org?format=json')
-                            .then(res => res.json())""")
-        return {
+        # Step 1: Get IP address from client browser
+        ip_data = st_javascript("""await fetch('https://api.ipify.org?format=json')
+                                  .then(res => res.json())""")
+        if not ip_data or 'ip' not in ip_data:
+            st.warning("Could not retrieve client IP.")
+            return None
+
+        ip = ip_data['ip']
+
+        # Step 2: Use IP to get location info
+        response = requests.get(f'https://ipapi.co/{ip}/json/')
+        if response.status_code == 200:
+            data = response.json()
+            return {
                 'city': data.get('city', 'Unknown'),
                 'region': data.get('region', 'Unknown'),
                 'country': data.get('country_name', 'Unknown'),
                 'latitude': data.get('latitude', 0),
                 'longitude': data.get('longitude', 0),
-                'ip': data.get('ip', 'Unknown')
+                'ip': ip
             }
+        else:
+            st.warning("Failed to fetch location details.")
     except Exception as e:
         st.error(f"Failed to get location: {str(e)}")
     return None
