@@ -16,7 +16,61 @@ import json
 import pandas as pd
 import numpy as np
 
-# Constants
+# Mock data functions for standalone deployment
+@st.cache_data
+def get_mock_account_details(user_id: str) -> Dict:
+    """Generate mock account details"""
+    return {
+        "user_id": user_id,
+        "account_number": f"DEMO{hash(user_id) % 100000:05d}",
+        "balance": 10000.00 if user_id == "demo" else 5000.00,
+        "account_type": "Demo Account" if user_id == "demo" else "Premium",
+        "last_activity": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "creation_date": datetime.now().strftime("%Y-%m-%d"),
+        "security_level": "Standard",
+        "recent_transactions": [
+            {
+                "date": (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d"),
+                "description": f"Transaction {i+1}",
+                "amount": float(f"{(i+1)*-100.50:.2f}")
+            }
+            for i in range(5)
+        ]
+    }
+
+@st.cache_data
+def get_mock_session_status(session_id: str) -> Dict:
+    """Generate mock session status"""
+    return {
+        "session_id": session_id,
+        "duration": int(time.time() % 3600),  # Mock duration
+        "risk_score": 0.15,
+        "security_score": 0.85,
+        "anomaly_score": 0.12,
+        "activity_timeline": [
+            {"time": f"{i:02d}:00", "activity": np.random.randint(10, 100)}
+            for i in range(24)
+        ],
+        "warnings": []
+    }
+
+@st.cache_data
+def get_mock_fraud_check(session_id: str) -> Dict:
+    """Generate mock fraud check results"""
+    return {
+        "risk_score": 0.15,
+        "security_score": 0.85,
+        "anomaly_score": 0.12,
+        "warnings": [],
+        "risk_factors": {
+            "location_risk": 0.1,
+            "device_risk": 0.05,
+            "behavior_risk": 0.08,
+            "time_risk": 0.02
+        }
+    }
+
+# Constants - keeping for compatibility but will be overridden
 API_BASE_URL = "http://localhost:8000"
 
 # Custom CSS
@@ -79,64 +133,43 @@ def get_client_location():
 
 def make_api_request(endpoint: str, method: str = 'GET', data: Optional[dict] = None, 
                     headers: Optional[dict] = None) -> Optional[dict]:
-    """Make API request with retry logic and error handling"""
+    """Mock API request function for standalone deployment"""
     try:
-        url = urljoin(API_BASE_URL, endpoint)
-        
-        # Add authorization header if user is authenticated
-        if hasattr(st.session_state, 'access_token'):
-            if headers is None:
-                headers = {}
-            headers['Authorization'] = f"Bearer {st.session_state.access_token}"
-        
-        response = requests.request(
-            method=method,
-            url=url,
-            json=data if data else None,
-            headers=headers if headers else {}
-        )
-        response.raise_for_status()
-        return response.json()
+        # Mock different endpoints with appropriate responses
+        if endpoint == "/api/account/details":
+            return get_mock_account_details(st.session_state.get('user_id', 'demo'))
+        elif endpoint.startswith("/api/session/status"):
+            session_id = st.session_state.get('session_id', 'demo_session')
+            return get_mock_session_status(session_id)
+        elif endpoint.startswith("/api/fraud/check"):
+            session_id = st.session_state.get('session_id', 'demo_session')
+            return get_mock_fraud_check(session_id)
+        elif endpoint == "/api/auth/login":
+            # Mock login response
+            return {
+                "access_token": "demo_token",
+                "token_type": "bearer",
+                "session_id": f"session_{int(time.time())}"
+            }
+        else:
+            # Default mock response for any other endpoints
+            return {"status": "success", "message": "Mock response"}
     except Exception as e:
-        st.error(f"API request failed: {str(e)}")
+        # Don't show error for mock requests, just return None
         return None
 
 def login(username: str, password: str) -> bool:
-    """Handle user login"""
+    """Handle user login - accepts any credentials for demo"""
     if not username or not password:
         st.error("Username and password are required")
         return False
     
-    # Special case for demo user
-    if username.lower() == "demo":
-        st.session_state.authenticated = True
-        st.session_state.user_id = "demo"
-        st.session_state.session_id = f"demo_session_{int(time.time())}"
-        st.session_state.access_token = "demo_token"
-        return True
-    
-    try:
-        data = {
-            "username": username,
-            "password": password
-        }
-        
-        response = make_api_request(
-            endpoint="/api/auth/login",
-            method="POST",
-            data=data
-        )
-        
-        if response:
-            st.session_state.authenticated = True
-            st.session_state.user_id = username
-            st.session_state.session_id = response['session_id']
-            st.session_state.access_token = response['access_token']
-            return True
-        return False
-    except Exception as e:
-        st.error(f"Login failed: {str(e)}")
-        return False
+    # Accept any username/password for demo purposes
+    st.session_state.authenticated = True
+    st.session_state.user_id = username
+    st.session_state.session_id = f"{username}_session_{int(time.time())}"
+    st.session_state.access_token = "demo_token"
+    return True
 
 def show_login_page():
     """Display the login page"""
@@ -150,11 +183,11 @@ def show_login_page():
         
         # Demo user information
         st.info("""
-        👋 **Try our demo account!**
-        - Username: `demo`
-        - Password: `demo`
+        👋 **Demo Mode Active!**
+        - Username: `demo` (or any username)
+        - Password: `demo` (or any password)
         
-        The demo account provides access to simulated banking data and security features.
+        This demo accepts any credentials and provides access to simulated banking data and security features.
         """)
         
         with st.form("login_form"):
